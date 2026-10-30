@@ -195,18 +195,17 @@ def process_multiple_hazard_maps(gdf_patients, zip_filepaths, hazard_type):
                 }
                 final_df['浸水レベル'] = final_df['rank_numeric'].map(flood_map).fillna(final_df['rank_code'].astype(str))
                 
-            elif hazard_type == "tsunami":
+           elif hazard_type == "tsunami":
                 tsunami_map = {
-                    1: "0.3m未満",
-                    2: "0.3m～1.0m未満",
-                    3: "1.0m～3.0m未満",
-                    4: "3.0m～5.0m未満",
-                    5: "5.0m～10.0m未満",
-                    6: "10.0m～20.0m未満",
-                    7: "20.0m以上"
+                    1: "0.5m未満",
+                    2: "0.5m～3.0m未満",
+                    3: "3.0m～5.0m未満",
+                    4: "5.0m～10.0m未満",
+                    5: "10.0m～20.0m未満",
+                    6: "20.0m以上"
                 }
                 final_df['浸水レベル'] = final_df['rank_numeric'].map(tsunami_map).fillna(final_df['rank_code'].astype(str))
-            
+               
             # 必要な列だけを残す
             final_df = final_df[['name', '浸水レベル']]
         else:
