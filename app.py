@@ -56,43 +56,44 @@ def convert_to_geojson_and_gdf(data):
 
 
 def process_multiple_hazard_maps(gdf_patients, zip_filepaths, hazard_type):
-    """複数のZIPファイルを順番に読み込み、まとめて判定する（クラウド対応版）"""
+    """複数のZIPファイルを順番に読み込み、まとめて判定する（クラウド対応・並び替え・ランク表示版）"""
     all_matched_dfs = []
-    
+
     for zip_path in zip_filepaths:
         if not os.path.exists(zip_path):
             continue
-            
+
         try:
-            # 【重要】クラウドのメモリ不足とLinuxの文字化け対策のため、一時フォルダに解凍して処理する
             with tempfile.TemporaryDirectory() as tmpdir:
-                
-                # 1. ZIPファイルの中身を安全に解凍する
+                # 1. ZIPファイルを解凍する
                 with zipfile.ZipFile(zip_path, 'r') as z:
                     for info in z.infolist():
                         try:
-                            # Windowsの日本語ファイル名をLinuxでも読めるように変換
                             decoded_name = info.filename.encode('cp437').decode('cp932')
                         except Exception:
                             decoded_name = info.filename
-                        
+
                         extracted_path = os.path.join(tmpdir, decoded_name)
                         os.makedirs(os.path.dirname(extracted_path), exist_ok=True)
-                        
-                        # ファイルを書き出す（フォルダの場合はスキップ）
+
                         if not info.is_dir():
                             with z.open(info) as source, open(extracted_path, "wb") as target:
                                 shutil.copyfileobj(source, target)
-                
+
                 # 2. 解凍したフォルダの中から対象のShapefileを探す
                 target_shps = []
                 for root, dirs, files in os.walk(tmpdir):
                     for file in files:
-                        if file.endswith('.shp') and '最大' in file:
-                            target_shps.append(os.path.join(root, file))
-                            
-                # 3. 「最大」がなければそれ以外を探す
-                if not target_shps:
+                        if file.endswith('.shp'):
+                            if hazard_type == "flood":
+                                if '最大' in file:
+                                    target_shps.append(os.path.join(root, file))
+                            else:
+                                # 津波・土砂の場合は、.shpをすべて対象にする
+                                target_shps.append(os.path.join(root, file))
+
+                # 洪水の「最大」が見つからなかった場合のバックアップ処理
+                if hazard_type == "flood" and not target_shps:
                     for root, dirs, files in os.walk(tmpdir):
                         for file in files:
                             if file.endswith('.shp') and ('継続' not in file) and ('倒壊' not in file) and ('氾濫' not in file):
@@ -102,7 +103,7 @@ def process_multiple_hazard_maps(gdf_patients, zip_filepaths, hazard_type):
                     st.warning(f"⚠️ {zip_path} の中に該当する .shp ファイルが見つかりません。")
                     continue
 
-                # 4. 見つかったShapefileをすべて読み込んで判定
+                # 3. 見つかったShapefileをすべて読み込んで判定
                 for shp_path in target_shps:
                     try:
                         gdf_hazard = gpd.read_file(shp_path, encoding="cp932")
@@ -115,50 +116,113 @@ def process_multiple_hazard_maps(gdf_patients, zip_filepaths, hazard_type):
                     # 空間結合（判定）
                     joined_data = gpd.sjoin(gdf_patients, gdf_hazard, how="inner", predicate="intersects")
 
-                    # 洪水の 0.5m 以上フィルタリング
-                    if hazard_type == "flood" and not joined_data.empty:
-                        target_col = None
-                        for col_name in ['A31_205', 'A31_105', 'A31_005', 'A31_05', '浸水ランク', '浸水ランクコード']:
-                            if col_name in joined_data.columns:
-                                target_col = col_name
-                                break
-                        
-                        if not target_col:
-                            fallback_cols = [col for col in joined_data.columns if (col.startswith('A31_') and col.endswith('05')) or 'ランク' in col]
-                            if fallback_cols:
-                                target_col = fallback_cols[0]
-
-                        if target_col:
-                            rank_numeric = pd.to_numeric(joined_data[target_col], errors='coerce')
-                            danger_codes = [2, 3, 4, 5, 6, 12, 13, 14, 15] 
-                            joined_data = joined_data[rank_numeric.isin(danger_codes)]
-
                     if not joined_data.empty:
-                        # 早めに 'name' だけに絞り込んでメモリを節約
-                        if 'name' in joined_data.columns:
-                            joined_data = joined_data[['name']]
-                        all_matched_dfs.append(joined_data)
-                    
+                        if hazard_type == "flood":
+                            # 洪水の浸水ランク列を探す
+                            target_col = None
+                            for col_name in ['A31_205', 'A31_105', 'A31_005', 'A31_05', '浸水ランク', '浸水ランクコード']:
+                                if col_name in joined_data.columns:
+                                    target_col = col_name
+                                    break
+                            
+                            if not target_col:
+                                fallback_cols = [col for col in joined_data.columns if (col.startswith('A31_') and col.endswith('05')) or 'ランク' in col]
+                                if fallback_cols:
+                                    target_col = fallback_cols[0]
+
+                            if target_col:
+                                rank_numeric = pd.to_numeric(joined_data[target_col], errors='coerce')
+                                danger_codes = [2, 3, 4, 5, 6, 12, 13, 14, 15] 
+                                joined_data = joined_data[rank_numeric.isin(danger_codes)]
+                                if not joined_data.empty:
+                                    joined_data['rank_code'] = joined_data[target_col]
+                                    all_matched_dfs.append(joined_data[['name', 'rank_code']])
+                                    
+                        elif hazard_type == "tsunami":
+                            # 津波の浸水ランク列を探す
+                            target_col = None
+                            for col_name in ['A40_003', 'A40_03', '浸水深', '浸水ランク']:
+                                if col_name in joined_data.columns:
+                                    target_col = col_name
+                                    break
+                            if not target_col:
+                                fallback_cols = [col for col in joined_data.columns if (col.startswith('A40_') and col.endswith('03'))]
+                                if fallback_cols:
+                                    target_col = fallback_cols[0]
+                                    
+                            if target_col:
+                                joined_data['rank_code'] = joined_data[target_col]
+                            else:
+                                joined_data['rank_code'] = "区分不明"
+                                
+                            all_matched_dfs.append(joined_data[['name', 'rank_code']])
+
+                        elif hazard_type == "landslide":
+                            # 土砂災害はそのまま抽出
+                            all_matched_dfs.append(joined_data[['name']])
+
                     # 1ファイル処理するごとにメモリを強制解放
                     del gdf_hazard
-                    
+
         except Exception as e:
             st.warning(f"⚠️ {zip_path} の読み込み中にエラーが発生しました: {e}")
 
-    # どのファイルでも該当者がいなかった場合
+    # 該当者がいなかった場合
     if not all_matched_dfs:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=['name'])
 
     # すべての判定結果を1つの表に合体
     final_df = pd.concat(all_matched_dfs, ignore_index=True)
-    if 'name' in final_df.columns:
-        final_df = final_df.drop_duplicates(subset=['name'])
     
+    if 'name' in final_df.columns:
+        # --- 浸水レベルの変換と重複削除 ---
+        if 'rank_code' in final_df.columns:
+            # 数値に変換して、最悪のランク（一番大きい数字）が優先されるようにソート
+            final_df['rank_numeric'] = pd.to_numeric(final_df['rank_code'], errors='coerce').fillna(0)
+            final_df = final_df.sort_values(by=['name', 'rank_numeric'], ascending=[True, False])
+            # 重複削除（一番上にきた最悪のランクだけが残る）
+            final_df = final_df.drop_duplicates(subset=['name'])
+            
+            # 国交省の標準コードに基づいて日本語のランクに翻訳
+            if hazard_type == "flood":
+                flood_map = {
+                    1: "0.5m未満", 11: "0.5m未満",
+                    2: "0.5m～3.0m未満", 12: "0.5m～3.0m未満",
+                    3: "3.0m～5.0m未満", 13: "3.0m～5.0m未満",
+                    4: "5.0m～10.0m未満", 14: "5.0m～10.0m未満",
+                    5: "10.0m～20.0m未満", 15: "10.0m～20.0m未満",
+                    6: "20.0m以上"
+                }
+                final_df['浸水レベル'] = final_df['rank_numeric'].map(flood_map).fillna(final_df['rank_code'].astype(str))
+                
+            elif hazard_type == "tsunami":
+                tsunami_map = {
+                    1: "0.3m未満",
+                    2: "0.3m～1.0m未満",
+                    3: "1.0m～3.0m未満",
+                    4: "3.0m～5.0m未満",
+                    5: "5.0m～10.0m未満",
+                    6: "10.0m～20.0m未満",
+                    7: "20.0m以上"
+                }
+                final_df['浸水レベル'] = final_df['rank_numeric'].map(tsunami_map).fillna(final_df['rank_code'].astype(str))
+            
+            # 必要な列だけを残す
+            final_df = final_df[['name', '浸水レベル']]
+        else:
+            final_df = final_df.drop_duplicates(subset=['name'])
+            final_df = final_df[['name']]
+
+        # --- 患者番号での並び替え（自然順） ---
+        # 可能な限り数値として解釈してソートする
+        final_df['sort_key'] = pd.to_numeric(final_df['name'], errors='coerce')
+        final_df = final_df.sort_values(by=['sort_key', 'name'])
+        final_df = final_df.drop(columns=['sort_key'])
+
     return final_df
 
-
 def to_excel_combined(df_tsunami, df_flood, df_landslide):
-    """3つの判定結果を1つのExcelファイルの別シートにまとめて出力する"""
+    """判定結果を1つのExcelファイルの別シートにまとめて出力する"""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         # 津波シート
@@ -210,7 +274,7 @@ def main():
     patient_file = st.file_uploader("GoogleマップのJSONファイル", type=["json"])
 
     if patient_file is not None:
-        # 1. まずGeoJSONへの変換処理を行う
+        # 1. GeoJSONへの変換処理を行う
         data = json.load(patient_file)
         features, gdf_patients = convert_to_geojson_and_gdf(data)
 
@@ -220,7 +284,7 @@ def main():
 
         st.success(f"患者データ {len(features)} 件を読み込みました。ハザード判定を開始します...")
 
-        # 2. ハザード判定処理（実行ボタンを無くし、自動で処理を走らせる）
+        # 2. ハザード判定処理
         with st.spinner("すべてのハザードマップと照合中...（数十秒かかる場合があります）"):
             
             # 津波
