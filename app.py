@@ -249,7 +249,7 @@ def to_excel_combined(df_tsunami, df_flood, df_landslide):
 
 def main():
     st.set_page_config(page_title="ハザード判定ツール", layout="wide")
-    st.title("📍 訪問診療患者 ハザードマップ判定ツール")
+    st.title("📍 訪問診療患者 ハザードマップ判定ツール ver1.0.1")
     st.write("患者さんの住所(JSON)をアップロードすると、GeoJSONの作成とハザードマップの自動照合を一括で行います。")
 
     # --- 複数のファイルパスをリスト形式で定義 ---
